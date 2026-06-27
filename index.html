@@ -608,12 +608,24 @@
               </svg>
             </div>
             <div class="custom-dropdown-menu" id="rider-dropdown-menu">
-              <div class="custom-dropdown-option placeholder" data-value="" onclick="selectRiderOption('', 'Choose a rider…')">Choose a rider…</div>
+              <div class="custom-dropdown-option placeholder" data-value="" onclick="selectRiderOption(\'\', \'Choose a rider…\')">Choose a rider…</div>
             </div>
             <input type="hidden" id="rider-select" value="">
           </div>
-          <input type="text" id="input-eta" placeholder="ETA (e.g. 20 mins)">
-          <button class="btn btn-primary btn-full" onclick="assignRider()">Assign & Notify Customer</button>
+
+          <label class="rider-select-label" style="margin-top:4px">Total amount to collect (SSP)</label>
+          <div style="position:relative">
+            <span style="position:absolute;left:12px;top:50%;transform:translateY(-50%);font-size:12px;color:var(--muted);font-weight:500;">SSP</span>
+            <input type="number" id="input-amount" placeholder="0" style="padding-left:44px;" min="0">
+          </div>
+          <div style="background:var(--green-dim);border:1px solid var(--green-border);border-radius:var(--radius-sm);padding:9px 12px;font-size:12px;color:var(--green);margin-bottom:8px;line-height:1.5;">
+            💡 Include vendor price + rider transport fee as one total
+          </div>
+
+          <label class="rider-select-label">ETA</label>
+          <input type="text" id="input-eta" placeholder="e.g. 20 mins">
+
+          <button class="btn btn-primary btn-full" onclick="assignRider()">Assign & Notify Customer on WhatsApp</button>
         </div>
 
         <!-- Actions -->
@@ -998,23 +1010,70 @@ function renderActions(o) {
 // ============================================================
 async function assignRider() {
   const riderId = document.getElementById('rider-select').value;
+  const amount  = document.getElementById('input-amount').value;
   const eta     = document.getElementById('input-eta').value;
+
   if (!riderId) { showToast('Please select a rider', true); return; }
+  if (!amount || parseInt(amount) <= 0) { showToast('Please enter the amount to collect', true); return; }
   if (!selectedOrder) return;
 
   const rider = riders.find(r => r.id === riderId);
+
+  // Update order in Supabase — set rider, status, and amount
   await patchOrder(selectedOrder.id, {
-    rider_id: riderId,
-    status: 'assigned',
-    assigned_at: new Date().toISOString()
+    rider_id:    riderId,
+    status:      'assigned',
+    assigned_at: new Date().toISOString(),
+    total_amount: parseFloat(amount)
   });
 
-  const template = TEMPLATES[0].full
-    .replace('[RIDER NAME]', rider?.name || '')
-    .replace('[RIDER NUMBER]', rider?.phone || '')
-    .replace('[XX]', eta || '??');
-  await navigator.clipboard.writeText(template).catch(()=>{});
-  showToast('Rider assigned! Template copied — paste in WhatsApp');
+  // Send WhatsApp notification to customer via Botpress API
+  await notifyCustomer(selectedOrder, rider, amount, eta);
+
+  showToast('✓ Rider assigned & customer notified on WhatsApp!');
+}
+
+async function notifyCustomer(order, rider, amount, eta) {
+  const conversationId = order.conversation_id;
+  if (!conversationId) {
+    // fallback: copy template to clipboard
+    const template = TEMPLATES[0].full
+      .replace('[RIDER NAME]', rider?.name || '')
+      .replace('[RIDER NUMBER]', rider?.phone || '')
+      .replace('[XX]', eta || '??');
+    await navigator.clipboard.writeText(template).catch(()=>{});
+    showToast('No conversation ID — template copied, paste in WhatsApp', true);
+    return;
+  }
+
+  const message =
+    `✅ Good news! Your rider has been assigned.\n\n` +
+    `🏍 Rider: ${rider?.name || ''}\n` +
+    `📞 Phone: ${rider?.phone || ''}\n` +
+    `⏱ ETA: ${eta || '??'} mins\n\n` +
+    `💰 Amount to pay on delivery: SSP ${parseInt(amount).toLocaleString()}\n\n` +
+    `Your rider is on the way to collect your item. You can contact them directly if needed.\n\n` +
+    `NileGo Delivery | Anywhere. Anytime.`;
+
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/notify-customer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + SUPABASE_KEY
+      },
+      body: JSON.stringify({ conversationId, message })
+    });
+
+    if (!res.ok) {
+      // Fallback to clipboard if edge function not set up yet
+      await navigator.clipboard.writeText(message).catch(()=>{});
+      showToast('Message copied — paste in WhatsApp (edge function not set up yet)', true);
+    }
+  } catch(e) {
+    await navigator.clipboard.writeText(message).catch(()=>{});
+    showToast('Message copied — paste in WhatsApp manually', true);
+  }
 }
 
 async function updateStatus(status) {
